@@ -1,105 +1,10 @@
 'use strict';
 
-
-//var _ = require('lodash');
 var Promise = require('bluebird');
 var path = require('path');
 var Queue = require('./lib/queue');
-var readline = require('readline');
 var fs = require('fs')
-/*
- Configuration
- // These should probably be terafoundation level configs
- namenode host
- namenode port
- user
- Overall this should be a plugin of some sort
- */
 
-
-function newProcessor(context, opConfig, jobConfig) {
-    var logger = context.logger;
-    var canMakeNewClient = opConfig.namenode_list.length >= 2;
-    var endpoint = opConfig.connection ? opConfig.connection : 'default';
-    var nodeNameHost = context.sysconfig.terafoundation.connectors.hdfs[endpoint].namenode_host;
-
-    //client connection cannot be cached, an endpoint needs to be re-instantiated for a different namenode_host
-    opConfig.connection_cache = false;
-
-    var client = getClient(context, opConfig, 'hdfs');
-    var hdfs = Promise.promisifyAll(client);
-
-    function prepare_file(hdfs, filename, chunks, logger) {
-        // We need to make sure the file exists before we try to append to it.
-        return hdfs.getFileStatusAsync(filename)
-            .catch(function(err) {
-                // We'll get an error if the file doesn't exist so create it.
-                return hdfs.mkdirsAsync(path.dirname(filename))
-                    .then(function(status) {
-                        logger.warn("I should be creating a file")
-                        return hdfs.createAsync(filename, '');
-                    })
-                    .catch(function(err) {
-                        if (canMakeNewClient && err.exception === "StandbyException") {
-                            return Promise.reject({initialize: true})
-                        }
-                        else {
-                            var errMsg = err.stack;
-                            return Promise.reject(`Error while attempting to create the file: ${filename} on hdfs, error: ${errMsg}`);
-                        }
-                    })
-            })
-            .return(chunks)
-            // We need to serialize the storage of chunks so we run with concurrency 1
-            .map(function(chunk) {
-                if (chunk.length > 0) {
-                    return hdfs.appendAsync(filename, chunk)
-                }
-            }, {concurrency: 1})
-            .catch(function(err) {
-                //for now we will throw if there is an async error
-                if (err.initialize) {
-                    return Promise.reject(err)
-                }
-                var errMsg = err.stack ? err.stack : err
-                return Promise.reject(`Error sending data to file: ${filename}, error: ${errMsg}, data: ${JSON.stringify(chunks)}`)
-            })
-    }
-
-    return function(data, logger) {
-        var map = {};
-        data.forEach(function(record) {
-            if (!map.hasOwnProperty(record.filename)) map[record.filename] = [];
-
-            map[record.filename].push(record.data)
-        });
-
-        function sendFiles() {
-            var stores = [];
-            _.forOwn(map, function(chunks, key) {
-                stores.push(prepare_file(hdfs, key, chunks, logger));
-            });
-
-            // We can process all individual files in parallel.
-            return Promise.all(stores)
-                .catch(function(err) {
-                    if (err.initialize) {
-                        logger.warn(`hdfs namenode has changed, reinitializing client`);
-                        var newClient = makeNewClient(context, opConfig, nodeNameHost, endpoint);
-                        hdfs = newClient.hdfs;
-                        nodeNameHost = newClient.nodeNameHost;
-                        return sendFiles()
-                    }
-
-                    var errMsg = err.stack ? err.stack : err
-                    logger.error(`Error while sending to hdfs, error: ${errMsg}`)
-                    return Promise.reject(err)
-                });
-        }
-
-        return sendFiles();
-    }
-}
 
 function makeNewClient(context, opConfig, conn, endpoint) {
     var list = opConfig.namenode_list;
@@ -140,55 +45,63 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
     let opConfig = getOpConfig(job.jobConfig, 'teraslice_hdfs_reader');
     let client = Promise.promisifyAll(getClient(context, opConfig, 'hdfs'));
     let hdfsPath = opConfig.path
-
     let queue = new Queue();
 
-    return client.listStatusAsync(opConfig.path)
-        .then(function(results) {
-            //TODO deal recursively with directories
-            let fileList = results.filter(function(obj) {
-                return obj.type === "FILE"
-            })
+    function processFile(file) {
+        let totalLength = file.length;
+        let fileSize = file.length
 
-            fileList.forEach(function(file) {
-                let totalLength = file.length;
-                let fileSize = file.length
+        if (fileSize <= opConfig.size) {
+            queue.enqueue({path: `${hdfsPath}/${file.pathSuffix}`, fullChunk: true})
+        }
+        else {
+            let offset = 0;
+            while (fileSize > 0) {
+                let length = fileSize > opConfig.size ? opConfig.size : fileSize;
+                queue.enqueue({
+                    path: `${hdfsPath}/${file.pathSuffix}`,
+                    offset: offset,
+                    length: length,
+                    total: totalLength
+                });
+                fileSize -= opConfig.size;
+                offset += length;
+            }
+        }
+    }
 
-                if (fileSize <= opConfig.size) {
-                    queue.enqueue({path: `${hdfsPath}/${file.pathSuffix}`, fullChunk: true})
-                }
-                else {
-                    let offset = 0;
-                    while (fileSize > 0) {
-                        let length = fileSize > opConfig.size ? opConfig.size : fileSize;
-                        queue.enqueue({
-                            path: `${hdfsPath}/${file.pathSuffix}`,
-                            offset: offset,
-                            length: length,
-                            total: totalLength
-                        });
-                        fileSize -= opConfig.size;
-                        offset += length;
+    function getFilePaths(path) {
+        return client.listStatusAsync(path)
+            .then(function(results) {
+                //console.log('what is results', results);
+                return Promise.map(results, function(metadata) {
+                    if (metadata.type === "FILE") {
+                        return processFile(metadata)
                     }
-                }
+
+                    if (metadata.type === "DIRECTORY") {
+                        return getFilePaths(`${path}/${metadata.pathSuffix}`)
+                    }
+
+                    return true
+                })
             })
+            .then(function() {
+                return [()=> queue.dequeue()]
+            })
+            .catch(function(err) {
+                console.log('the error', err)
+            })
+    }
 
-            return [()=> queue.dequeue()]
-        })
-        .catch(function(err) {
-            console.log('the error', err)
-        })
-
+    return getFilePaths(opConfig.path)
 }
 
 
 function newReader(context, opConfig, jobConfig) {
     let client = Promise.promisifyAll(getClient(context, opConfig, 'hdfs'));
-    let processChunk = chunker(opConfig)
-    return function(msg, logger) {
-        //if length is given, fill should not be read in one go
-        //logger.error('the orig message', msg)
 
+    return function(msg, logger) {
         return determineChunk(client, msg, logger)
     };
 }
@@ -196,6 +109,7 @@ function newReader(context, opConfig, jobConfig) {
 function getChunk(client, msg, options) {
     if (msg.total) {
         if (msg.total <= options.offset) {
+            //the last slice will try to over shoot, just return an empty string
             return Promise.resolve('')
         }
     }
@@ -222,10 +136,9 @@ function determineChunk(client, msg, logger) {
                 //TODO hard bound length to 500, improve this
                 let nextChunk = {offset: msg.offset + msg.length, length: 500}
 
-                //TODO need to deal with the condition of last chunk, dont need to query again
                 return getChunk(client, msg, nextChunk)
                     .then(function(nextStr) {
-                       // logger.error('next str', nextStr)
+                        // logger.error('next str', nextStr)
                         let nextNewLine = nextStr.search(/\n/);
                         let nextDoc = nextStr.slice(0, nextNewLine);
 
@@ -248,7 +161,7 @@ function determineChunk(client, msg, logger) {
                             //TODO review this as it can be really expensive
                             dataList.shift()
                         }
-                        
+
                         return dataList.map(chunk => JSON.parse(chunk))
                     })
                     .catch(function(err) {
