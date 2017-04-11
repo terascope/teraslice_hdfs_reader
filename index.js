@@ -6,21 +6,6 @@ var Queue = require('./lib/queue');
 var fs = require('fs')
 
 
-function makeNewClient(context, opConfig, conn, endpoint) {
-    var list = opConfig.namenode_list;
-    //we want the next spot
-    var index = list.indexOf(conn) + 1;
-    //if empty start from the beginning of the
-    var nodeNameHost = list[index] ? list[index] : list[0];
-
-    //TODO need to review this, altering config so getClient will start with new namenode_host
-    context.sysconfig.terafoundation.connectors.hdfs[endpoint].namenode_host = nodeNameHost
-    return {
-        nodeNameHost: nodeNameHost,
-        hdfs: Promise.promisifyAll(getClient(context, opConfig, 'hdfs'))
-    }
-}
-
 function getClient(context, config, type) {
     var clientConfig = {};
     clientConfig.type = type;
@@ -35,7 +20,7 @@ function getClient(context, config, type) {
         clientConfig.cached = true;
     }
 
-    return context.foundation.getConnection(clientConfig).client;
+    return context.foundation.getConnection(clientConfig);
 }
 
 
@@ -43,23 +28,24 @@ var parallelSlicers = false;
 
 function newSlicer(context, job, retryData, slicerAnalytics, logger) {
     let opConfig = getOpConfig(job.jobConfig, 'teraslice_hdfs_reader');
-    let client = Promise.promisifyAll(getClient(context, opConfig, 'hdfs'));
-    let hdfsPath = opConfig.path
+    let clientService = getClient(context, opConfig, 'hdfs_ha');
+    let client = clientService.client
     let queue = new Queue();
 
-    function processFile(file) {
+    function processFile(file, path) {
+        console.log('what file', file);
         let totalLength = file.length;
         let fileSize = file.length
 
         if (fileSize <= opConfig.size) {
-            queue.enqueue({path: `${hdfsPath}/${file.pathSuffix}`, fullChunk: true})
+            queue.enqueue({path: `${path}/${file.pathSuffix}`, fullChunk: true})
         }
         else {
             let offset = 0;
             while (fileSize > 0) {
                 let length = fileSize > opConfig.size ? opConfig.size : fileSize;
                 queue.enqueue({
-                    path: `${hdfsPath}/${file.pathSuffix}`,
+                    path: `${path}/${file.pathSuffix}`,
                     offset: offset,
                     length: length,
                     total: totalLength
@@ -73,10 +59,9 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
     function getFilePaths(path) {
         return client.listStatusAsync(path)
             .then(function(results) {
-                //console.log('what is results', results);
                 return Promise.map(results, function(metadata) {
                     if (metadata.type === "FILE") {
-                        return processFile(metadata)
+                        return processFile(metadata, path)
                     }
 
                     if (metadata.type === "DIRECTORY") {
@@ -90,20 +75,61 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
                 return [()=> queue.dequeue()]
             })
             .catch(function(err) {
-                console.log('the error', err)
+                if (err.exception === "StandbyException") {
+                    return Promise.reject({initialize: true})
+                }
+                else {
+                    var errMsg = err.stack;
+                    return Promise.reject(`Error while attempting to read from hdfs path: ${path}, error: ${errMsg}`);
+                }
+
             })
     }
 
     return getFilePaths(opConfig.path)
+        .catch(function(err) {
+            if (err.initialize) {
+                logger.warn(`hdfs namenode has changed, reinitializing client`);
+                var newClient = clientService.changeNameNode().client;
+                client = newClient;
+                return getFilePaths(opConfig.path)
+            }
+            else {
+
+                var errMsg = err.stack ? err.stack : err
+                logger.error(`Error while reading from hdfs, error: ${errMsg}`)
+                return Promise.reject(err)
+            }
+        })
 }
 
 
 function newReader(context, opConfig, jobConfig) {
-    let client = Promise.promisifyAll(getClient(context, opConfig, 'hdfs'));
+    let clientService = getClient(context, opConfig, 'hdfs_ha');
+    let client = clientService.client
 
-    return function(msg, logger) {
+    return function readChunk(msg, logger) {
         return determineChunk(client, msg, logger)
+            .catch(function(err) {
+                if (err.initialize) {
+                    logger.warn(`hdfs namenode has changed, reinitializing client`);
+                    client = clientService.changeNameNode().client;
+                    return readChunk(msg, logger)
+                }
+                else {
+                    var errMsg = parseError(err)
+                    logger.error(errMsg)
+                    return Promise.reject(err)
+                }
+            })
     };
+}
+
+function parseError(err) {
+    console.log('what error do we have here', err.message, err.exception)
+    if (err.message && err.exception) {
+        return `Error while reading from hdfs, error: ${err.exception}, ${err.message}`
+    }
 }
 
 function getChunk(client, msg, options) {
@@ -114,7 +140,15 @@ function getChunk(client, msg, options) {
         }
     }
 
-    return client.openAsync(msg.path, options)
+    return client.openAsync(msg.path, options, {json: true})
+        .then(function(results) {
+            if (results === '{"RemoteException":{"exception":"StandbyException","javaClassName":"org.apache.hadoop.ipc.StandbyException","message":"Operation category READ is not supported in state standby. Visit https://s.apache.org/sbnn-error"}}') {
+                return Promise.reject()
+            }
+            else {
+                return results
+            }
+        })
 }
 
 function determineChunk(client, msg, logger) {
@@ -161,12 +195,27 @@ function determineChunk(client, msg, logger) {
                             //TODO review this as it can be really expensive
                             dataList.shift()
                         }
-
-                        return dataList.map(chunk => JSON.parse(chunk))
+                        console.log(dataList)
+                        return dataList.map(chunk => chunk)
                     })
                     .catch(function(err) {
-                        logger.error('what error is this', err)
+                        if (err.exception === "StandbyException") {
+                            return Promise.reject({initialize: true})
+                        }
+                        else {
+                            var errMsg = err.stack;
+                            return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
+                        }
                     })
+            }
+        })
+        .catch(function(err) {
+            if (err.exception === "StandbyException" || err.initialize) {
+                return Promise.reject({initialize: true})
+            }
+            else {
+                var errMsg = err.stack;
+                return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
             }
         })
 }
