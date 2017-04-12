@@ -271,10 +271,6 @@ function schema() {
             default: 'hdfs',
             format: 'optional_String'
         },
-        namenode_list: {
-            doc: 'A list containing all namenode_hosts, this option is needed for high availability',
-            default: []
-        },
         path: {
             doc: "HDFS location to process. Most of the time this will be a directory that contains multiple files",
             default: '',
