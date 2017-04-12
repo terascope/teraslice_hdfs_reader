@@ -267,7 +267,7 @@ function getOpConfig(job, name) {
 function schema() {
     return {
         user: {
-            doc: 'User to use when writing the files. Default: "hdfs"',
+            doc: 'User to use when reading the files. Default: "hdfs"',
             default: 'hdfs',
             format: 'optional_String'
         },
