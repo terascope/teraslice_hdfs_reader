@@ -23,7 +23,6 @@ function getClient(context, config, type) {
     return context.foundation.getConnection(clientConfig);
 }
 
-
 var parallelSlicers = false;
 
 function newSlicer(context, job, retryData, slicerAnalytics, logger) {
@@ -33,7 +32,6 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
     let queue = new Queue();
 
     function processFile(file, path) {
-        console.log('what file', file);
         let totalLength = file.length;
         let fileSize = file.length
 
@@ -79,10 +77,9 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
                     return Promise.reject({initialize: true})
                 }
                 else {
-                    var errMsg = err.stack;
-                    return Promise.reject(`Error while attempting to read from hdfs path: ${path}, error: ${errMsg}`);
+                    var errMsg = parseError(err);
+                    return Promise.reject(errMsg);
                 }
-
             })
     }
 
@@ -95,10 +92,9 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
                 return getFilePaths(opConfig.path)
             }
             else {
-
-                var errMsg = err.stack ? err.stack : err
+                var errMsg = parseError(err)
                 logger.error(`Error while reading from hdfs, error: ${errMsg}`)
-                return Promise.reject(err)
+                return Promise.reject(errMsg)
             }
         })
 }
@@ -107,9 +103,13 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
 function newReader(context, opConfig, jobConfig) {
     let clientService = getClient(context, opConfig, 'hdfs_ha');
     let client = clientService.client
+    let chunkFormater = chunkType(opConfig)
 
     return function readChunk(msg, logger) {
         return determineChunk(client, msg, logger)
+            .then(function(results) {
+                return chunkFormater(results)
+            })
             .catch(function(err) {
                 if (err.initialize) {
                     logger.warn(`hdfs namenode has changed, reinitializing client`);
@@ -126,10 +126,10 @@ function newReader(context, opConfig, jobConfig) {
 }
 
 function parseError(err) {
-    console.log('what error do we have here', err.message, err.exception)
     if (err.message && err.exception) {
         return `Error while reading from hdfs, error: ${err.exception}, ${err.message}`
     }
+    return `Error while reading from hdfs, error: ${err}`
 }
 
 function getChunk(client, msg, options) {
@@ -140,15 +140,38 @@ function getChunk(client, msg, options) {
         }
     }
 
-    return client.openAsync(msg.path, options, {json: true})
-        .then(function(results) {
-            if (results === '{"RemoteException":{"exception":"StandbyException","javaClassName":"org.apache.hadoop.ipc.StandbyException","message":"Operation category READ is not supported in state standby. Visit https://s.apache.org/sbnn-error"}}') {
-                return Promise.reject()
-            }
-            else {
-                return results
-            }
-        })
+    return client.openAsync(msg.path, options)
+}
+
+function averageDocSize(array) {
+    return Math.floor(array.reduce((accum, str)=> {
+            return accum + str.length;
+        }, 0) / array.length)
+}
+
+function nextChunk(slice, avgLength) {
+    let newStart = slice.offset + slice.length;
+    let newLength = (newStart + avgLength) < slice.total ? avgLength : slice.total - newStart;
+    return {offset: newStart, length: newLength, total: slice.total};
+}
+
+function getNextDoc(client, msg, avgLength) {
+    let nextDocOptions = nextChunk(msg, avgLength);
+
+    function getDoc(client, msg, options) {
+        return getChunk(client, msg, options)
+            .then(function(chunk) {
+                if (chunk.search(/\n/) !== -1 || chunk.length === 0) {
+                    return chunk
+                }
+                else {
+                    let nextChunkOptions = nextChunk(options, avgLength)
+                    return getDoc(client, msg, nextChunk)
+                }
+            })
+    }
+
+    return getDoc(client, msg, nextDocOptions);
 }
 
 function determineChunk(client, msg, logger) {
@@ -164,13 +187,12 @@ function determineChunk(client, msg, logger) {
             let allRecordsIntact = str[str.length - 1] === '\n' ? true : false;
             let dataList = str.split("\n");
             if (msg.fullChunk) {
-                return dataList.map(chunk => JSON.parse(chunk))
+                return dataList;
             }
             else {
-                //TODO hard bound length to 500, improve this
-                let nextChunk = {offset: msg.offset + msg.length, length: 500}
+                let newLength = averageDocSize(dataList) * 2;
 
-                return getChunk(client, msg, nextChunk)
+                return getNextDoc(client, msg, newLength)
                     .then(function(nextStr) {
                         // logger.error('next str', nextStr)
                         let nextNewLine = nextStr.search(/\n/);
@@ -187,16 +209,15 @@ function determineChunk(client, msg, logger) {
                             }
                             else {
                                 //concat the last doc of the array together to complete the record
-                                dataList[dataList.length - 1] = dataList[dataList.length - 1] + nextDoc
+                                dataList[dataList.length - 1] = dataList[dataList.length - 1] + nextDoc;
                             }
                         }
 
                         if (msg.offset !== 0) {
-                            //TODO review this as it can be really expensive
                             dataList.shift()
                         }
-                        console.log(dataList)
-                        return dataList.map(chunk => chunk)
+
+                        return dataList;
                     })
                     .catch(function(err) {
                         if (err.exception === "StandbyException") {
@@ -220,31 +241,19 @@ function determineChunk(client, msg, logger) {
         })
 }
 
-function json_lines(str) {
+function json_lines(data) {
+    return data.map(record => JSON.parse(record))
+}
 
+function defaultLines(data) {
+    return data
 }
 
 function chunkType(opConfig) {
     if (opConfig.format === 'json_lines') {
         return json_lines
     }
-}
-
-function chunker(opConfig) {
-    var chunkFormater = chunkType(opConfig)
-    return function(msg, str) {
-        //is a complete file
-        if (msg.fullChunk) {
-            return chunkFormater(str)
-        }
-        else {
-            //if offset is zero, its the start of the slice
-            //if(msg.offset === 0){
-            return chunkFormater(str)
-            //}
-
-        }
-    }
+    return defaultLines
 }
 
 
@@ -281,7 +290,7 @@ function schema() {
         },
         size: {
             doc: "How big of a slice to take out of each file",
-            default: 2524,
+            default: 100000,
             format: Number
         },
         format: {
@@ -299,3 +308,6 @@ module.exports = {
     schema: schema,
     parallelSlicers: parallelSlicers
 };
+
+
+//var data = {"ip":"192.159.51.130","userAgent":"Mozilla/5.0 (Windows; U; Windows NT 6.1) AppleWebKit/537.0.0 (KHTML, like Gecko) Chrome/17.0.815.0 Safari/537.0.0","url":"http://johann.com","uuid":"f1c3ff4d-a2a0-4ad9-85c0-010343ecd2a7","created":"2016-03-27T01:56:21.870-07:00","ipv6":"6ccc:f85f:6710:8c4a:3180:b6c9:4db8:f5a0","location":"-46.1338, -158.68851","bytes":4082750}{"ip":"62.98.174.63","userAgent":"Mozilla/5.0 (Windows; U; Windows NT 5.3) AppleWebKit/531.1.0 (KHTML, like Gecko) Chrome/39.0.881.0 Safari/531.1.0","url":"https://mossie.org","uuid":"0795f45a-00c7-4ac6-a9e7-8347a4b40716","created":"2016-03-27T07:59:18.385-07:00","ipv6":"93d7:0934:9031:ccca:201a:255b:06b2:def6","location":"-22.26034, -171.79662","bytes":218312}
