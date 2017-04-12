@@ -2,8 +2,8 @@
 
 var Promise = require('bluebird');
 var path = require('path');
-var Queue = require('./lib/queue');
-var fs = require('fs')
+var Queue = require('queue');
+var fs = require('fs');
 
 
 function getClient(context, config, type) {
@@ -28,12 +28,12 @@ var parallelSlicers = false;
 function newSlicer(context, job, retryData, slicerAnalytics, logger) {
     let opConfig = getOpConfig(job.jobConfig, 'teraslice_hdfs_reader');
     let clientService = getClient(context, opConfig, 'hdfs_ha');
-    let client = clientService.client
+    let client = clientService.client;
     let queue = new Queue();
 
     function processFile(file, path) {
         let totalLength = file.length;
-        let fileSize = file.length
+        let fileSize = file.length;
 
         if (fileSize <= opConfig.size) {
             queue.enqueue({path: `${path}/${file.pathSuffix}`, fullChunk: true})
@@ -93,7 +93,7 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
             }
             else {
                 var errMsg = parseError(err)
-                logger.error(`Error while reading from hdfs, error: ${errMsg}`)
+                logger.error(`Error while reading from hdfs, error: ${errMsg}`);
                 return Promise.reject(errMsg)
             }
         })
@@ -102,8 +102,8 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
 
 function newReader(context, opConfig, jobConfig) {
     let clientService = getClient(context, opConfig, 'hdfs_ha');
-    let client = clientService.client
-    let chunkFormater = chunkType(opConfig)
+    let client = clientService.client;
+    let chunkFormater = chunkType(opConfig);
 
     return function readChunk(msg, logger) {
         return determineChunk(client, msg, logger)
@@ -117,9 +117,9 @@ function newReader(context, opConfig, jobConfig) {
                     return readChunk(msg, logger)
                 }
                 else {
-                    var errMsg = parseError(err)
-                    logger.error(errMsg)
-                    return Promise.reject(err)
+                    var errMsg = parseError(err);
+                    logger.error(errMsg);
+                    return Promise.reject(err);
                 }
             })
     };
@@ -165,8 +165,8 @@ function getNextDoc(client, msg, avgLength) {
                     return chunk
                 }
                 else {
-                    let nextChunkOptions = nextChunk(options, avgLength)
-                    return getDoc(client, msg, nextChunk)
+                    let nextChunkOptions = nextChunk(options, avgLength);
+                    return getDoc(client, msg, nextChunkOptions)
                 }
             })
     }
@@ -184,7 +184,7 @@ function determineChunk(client, msg, logger) {
 
     return getChunk(client, msg, options)
         .then(function(str) {
-            let allRecordsIntact = str[str.length - 1] === '\n' ? true : false;
+            let allRecordsIntact = str[str.length - 1] === '\n';
             let dataList = str.split("\n");
             if (msg.fullChunk) {
                 return dataList;
@@ -305,5 +305,3 @@ module.exports = {
     parallelSlicers: parallelSlicers
 };
 
-
-//var data = {"ip":"192.159.51.130","userAgent":"Mozilla/5.0 (Windows; U; Windows NT 6.1) AppleWebKit/537.0.0 (KHTML, like Gecko) Chrome/17.0.815.0 Safari/537.0.0","url":"http://johann.com","uuid":"f1c3ff4d-a2a0-4ad9-85c0-010343ecd2a7","created":"2016-03-27T01:56:21.870-07:00","ipv6":"6ccc:f85f:6710:8c4a:3180:b6c9:4db8:f5a0","location":"-46.1338, -158.68851","bytes":4082750}{"ip":"62.98.174.63","userAgent":"Mozilla/5.0 (Windows; U; Windows NT 5.3) AppleWebKit/531.1.0 (KHTML, like Gecko) Chrome/39.0.881.0 Safari/531.1.0","url":"https://mossie.org","uuid":"0795f45a-00c7-4ac6-a9e7-8347a4b40716","created":"2016-03-27T07:59:18.385-07:00","ipv6":"93d7:0934:9031:ccca:201a:255b:06b2:def6","location":"-22.26034, -171.79662","bytes":218312}
