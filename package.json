@@ -18,6 +18,6 @@
   "homepage": "https://github.com/jsnoble/teraslice_hdfs_reader#readme",
   "dependencies": {
     "bluebird": "^3.5.0",
-    "queue": "git+https://git@github.com/terascope/queue.git"
+    "queue": "terascope/queue"
   }
 }
