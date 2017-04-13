@@ -1,0 +1,23 @@
+{
+  "name": "teraslice_hdfs_reader",
+  "version": "1.0.0",
+  "description": "Teraslice reader to process JSON data stored in text files in HDFS.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/terascope/teraslice_hdfs_reader.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jsnoble/teraslice_hdfs_reader/issues"
+  },
+  "homepage": "https://github.com/jsnoble/teraslice_hdfs_reader#readme",
+  "dependencies": {
+    "bluebird": "^3.5.0",
+    "queue": "git+https://git@github.com/terascope/queue.git"
+  }
+}
