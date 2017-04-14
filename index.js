@@ -285,7 +285,7 @@ function schema() {
             }
         },
         size: {
-            doc: "How big of a slice to take out of each file",
+            doc: "How big of a slice in bytes to take out of each file.",
             default: 100000,
             format: Number
         },
@@ -293,6 +293,11 @@ function schema() {
             doc: "For now just supporting json_lines but other formats may make sense later.",
             default: "json_lines",
             format: ["json_lines"]
+        },
+        connection: {
+            doc: 'Name of the HDFS connection to use.',
+            default: 'default',
+            format: 'optional_String'
         }
     };
 }
