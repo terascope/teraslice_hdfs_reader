@@ -101,9 +101,33 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
 
 
 function newReader(context, opConfig, jobConfig) {
+    let logger = context.logger; // TODO: I don't think this is the correct logger
     let clientService = getClient(context, opConfig, 'hdfs_ha');
     let client = clientService.client;
     let chunkFormater = chunkType(opConfig);
+
+    function json_lines(data) {
+        return data.map(record => {
+            try {
+                return JSON.parse(record);
+            }
+            catch(e) {
+                logger.error("Record is not valid JSON " + e);
+                logger.error(record);
+            }
+        }).filter(element => element !== undefined );
+    }
+
+    function defaultLines(data) {
+        return data
+    }
+
+    function chunkType(opConfig) {
+        if (opConfig.format === 'json_lines') {
+            return json_lines
+        }
+        return defaultLines
+    }
 
     return function readChunk(msg, logger) {
         return determineChunk(client, msg, logger)
@@ -240,22 +264,6 @@ function determineChunk(client, msg, logger) {
             }
         })
 }
-
-function json_lines(data) {
-    return data.map(record => JSON.parse(record))
-}
-
-function defaultLines(data) {
-    return data
-}
-
-function chunkType(opConfig) {
-    if (opConfig.format === 'json_lines') {
-        return json_lines
-    }
-    return defaultLines
-}
-
 
 function getOpConfig(job, name) {
     return job.operations.find(function(op) {
