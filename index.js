@@ -73,29 +73,16 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
                 return [()=> queue.dequeue()]
             })
             .catch(function(err) {
-                if (err.exception === "StandbyException") {
-                    return Promise.reject({initialize: true})
-                }
-                else {
-                    var errMsg = parseError(err);
-                    return Promise.reject(errMsg);
-                }
+                var errMsg = parseError(err);
+                return Promise.reject(errMsg);
             })
     }
 
     return getFilePaths(opConfig.path)
         .catch(function(err) {
-            if (err.initialize) {
-                logger.warn(`hdfs namenode has changed, reinitializing client`);
-                var newClient = clientService.changeNameNode().client;
-                client = newClient;
-                return getFilePaths(opConfig.path)
-            }
-            else {
-                var errMsg = parseError(err)
-                logger.error(`Error while reading from hdfs, error: ${errMsg}`);
-                return Promise.reject(errMsg)
-            }
+            var errMsg = parseError(err);
+            logger.error(`Error while reading from hdfs, error: ${errMsg}`);
+            return Promise.reject(errMsg)
         })
 }
 
@@ -111,16 +98,9 @@ function newReader(context, opConfig, jobConfig) {
                 return chunkFormater(results)
             })
             .catch(function(err) {
-                if (err.initialize) {
-                    logger.warn(`hdfs namenode has changed, reinitializing client`);
-                    client = clientService.changeNameNode().client;
-                    return readChunk(msg, logger)
-                }
-                else {
-                    var errMsg = parseError(err);
-                    logger.error(errMsg);
-                    return Promise.reject(err);
-                }
+                var errMsg = parseError(err);
+                logger.error(errMsg);
+                return Promise.reject(err);
             })
     };
 }
@@ -220,24 +200,14 @@ function determineChunk(client, msg, logger) {
                         return dataList;
                     })
                     .catch(function(err) {
-                        if (err.exception === "StandbyException") {
-                            return Promise.reject({initialize: true})
-                        }
-                        else {
-                            var errMsg = err.stack;
-                            return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
-                        }
+                        var errMsg = err.stack;
+                        return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
                     })
             }
         })
         .catch(function(err) {
-            if (err.exception === "StandbyException" || err.initialize) {
-                return Promise.reject({initialize: true})
-            }
-            else {
-                var errMsg = err.stack;
-                return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
-            }
+            var errMsg = err.stack;
+            return Promise.reject(`Error while attempting process hdfs slice: ${JSON.stringify(msg)} on hdfs, error: ${errMsg}`);
         })
 }
 
