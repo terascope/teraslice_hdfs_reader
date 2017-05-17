@@ -1,3 +1,11 @@
+# Reader - teraslice_hdfs_reader
+
+To install from the root of your teraslice instance.
+
+```
+npm install terascope/teraslice_hdfs_reader
+```
+
 # Description
 
 Teraslice reader to process JSON data stored in text files in HDFS.
