@@ -25,8 +25,8 @@ function getClient(context, config, type) {
 
 var parallelSlicers = false;
 
-function newSlicer(context, job, retryData, slicerAnalytics, logger) {
-    let opConfig = getOpConfig(job.jobConfig, 'teraslice_hdfs_reader');
+function newSlicer(context, executionContext, retryData, logger) {
+    let opConfig = getOpConfig(executionContext.config, 'teraslice_hdfs_reader');
     let clientService = getClient(context, opConfig, 'hdfs_ha');
     let client = clientService.client;
     let queue = new Queue();
@@ -87,7 +87,7 @@ function newSlicer(context, job, retryData, slicerAnalytics, logger) {
 }
 
 
-function newReader(context, opConfig, jobConfig) {
+function newReader(context, opConfig, executionConfig) {
     let logger = context.logger; // TODO: I don't think this is the correct logger
     let clientService = getClient(context, opConfig, 'hdfs_ha');
     let client = clientService.client;
@@ -235,8 +235,8 @@ function determineChunk(client, msg, logger) {
         })
 }
 
-function getOpConfig(job, name) {
-    return job.operations.find(function(op) {
+function getOpConfig(executionConfig, name) {
+    return executionConfig.operations.find(function(op) {
         return op._op === name;
     })
 }
